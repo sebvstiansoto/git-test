@@ -1,27 +1,33 @@
 // InventoryComponent.cpp
-// Implementación del componente de inventario tipo cuadrícula para ZonaRoja
 
 #include "Components/InventoryComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "Engine/DataTable.h"
+#include "GameFramework/Actor.h"
+
+// DataTable de definiciones de items (asignado en el GameInstance o Config DataAsset)
+static UDataTable* GItemDefinitionTable = nullptr;
+
+// ============================================================
+// CONSTRUCTOR
+// ============================================================
 
 UInventoryComponent::UInventoryComponent()
 {
 	SetIsReplicatedByDefault(true);
+	PrimaryComponentTick.bCanEverTick = false;
 
-	// Cuadrícula de inventario predeterminada: 10x10 celdas (100 slots)
-	// Se ampliará con accesorios como mochilas y chalecos
-	GridColumns = 10;
-	GridRows = 10;
+	GridColumns = BaseGridColumns;
+	GridRows    = BaseGridRows;
 }
 
 void UInventoryComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Inicializar la cuadrícula solo en el servidor
 	if (GetOwner()->HasAuthority())
 	{
-		InitializeGrid();
+		RebuildGrid();
 	}
 }
 
@@ -29,282 +35,388 @@ void UInventoryComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
-	DOREPLIFETIME(UInventoryComponent, InventoryGrid);
-	DOREPLIFETIME(UInventoryComponent, EquipmentSlots);
+	// El grid y el equipo solo van al dueño (anti-cheat: otros jugadores no deben
+	// saber el contenido exacto del inventario de un rival)
+	DOREPLIFETIME_CONDITION(UInventoryComponent, Grid,             COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(UInventoryComponent, Equipment,        COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(UInventoryComponent, CurrentWeightGrams, COND_OwnerOnly);
+	DOREPLIFETIME(UInventoryComponent, GridColumns);
+	DOREPLIFETIME(UInventoryComponent, GridRows);
 }
 
 // ============================================================
-// INICIALIZACION
+// OPERACIONES PRINCIPALES
 // ============================================================
 
-void UInventoryComponent::InitializeGrid()
-{
-	const int32 TotalSlots = GridColumns * GridRows;
-	InventoryGrid.SetNum(TotalSlots);
-
-	for (int32 i = 0; i < TotalSlots; ++i)
-	{
-		InventoryGrid[i].bIsOccupied = false;
-		InventoryGrid[i].SlotIndex = i;
-	}
-}
-
-// ============================================================
-// FUNCIONES PRINCIPALES
-// ============================================================
-
-bool UInventoryComponent::TryAddItem(const FItemData& ItemData, int32 ItemWidth, int32 ItemHeight)
-{
-	if (!GetOwner()->HasAuthority())
-	{
-		return false; // Solo el servidor puede modificar el inventario
-	}
-
-	int32 FreeSlot = -1;
-	if (FindFreeSlot(ItemWidth, ItemHeight, FreeSlot))
-	{
-		return AddItemToSlot(ItemData, FreeSlot, ItemWidth, ItemHeight);
-	}
-
-	UE_LOG(LogTemp, Warning, TEXT("[ZonaRoja] Inventario lleno: no se pudo añadir %s"),
-		*ItemData.ItemDefinitionID.ToString());
-	return false;
-}
-
-bool UInventoryComponent::AddItemToSlot(const FItemData& ItemData, int32 SlotIndex,
+EInventoryResult UInventoryComponent::TryAddItem(const FItemData& ItemData,
 	int32 ItemWidth, int32 ItemHeight)
 {
-	if (!GetOwner()->HasAuthority())
-	{
-		return false;
-	}
+	if (!GetOwner()->HasAuthority()) return EInventoryResult::NotAuthority;
+	if (!ItemData.IsValid())         return EInventoryResult::InvalidItem;
 
-	if (!CanFitItemAt(SlotIndex, ItemWidth, ItemHeight))
+	// Intentar apilar sobre stacks existentes del mismo tipo
+	if (ItemData.StackCount > 1 || ItemWidth == 1)
 	{
-		return false;
-	}
-
-	// Marcar todas las celdas ocupadas por el item
-	const int32 StartRow = SlotIndex / GridColumns;
-	const int32 StartCol = SlotIndex % GridColumns;
-
-	for (int32 Row = StartRow; Row < StartRow + ItemHeight; ++Row)
-	{
-		for (int32 Col = StartCol; Col < StartCol + ItemWidth; ++Col)
+		for (FInventorySlot& Slot : Grid)
 		{
-			const int32 CellIndex = Row * GridColumns + Col;
-			if (CellIndex < InventoryGrid.Num())
+			if (!Slot.bIsRootSlot) continue;
+			if (Slot.ItemData.ItemDefinitionID != ItemData.ItemDefinitionID) continue;
+
+			// TODO: consultar MaxStackSize desde DT_ItemDefinitions
+			// Por ahora usamos 999 como máximo universal para apilables
+			const int32 MaxStack = 999;
+			const int32 Remaining = MaxStack - Slot.ItemData.StackCount;
+			if (Remaining <= 0) continue;
+
+			const int32 ToAdd = FMath::Min(ItemData.StackCount, Remaining);
+			Slot.ItemData.StackCount += ToAdd;
+
+			// Si se apiló todo, notificar y salir
+			if (ToAdd >= ItemData.StackCount)
 			{
-				InventoryGrid[CellIndex].bIsOccupied = true;
-				InventoryGrid[CellIndex].ItemData = ItemData;
-				InventoryGrid[CellIndex].ItemWidth = ItemWidth;
-				InventoryGrid[CellIndex].ItemHeight = ItemHeight;
+				OnItemAdded.Broadcast(Slot.ItemData, Slot.SlotIndex);
+				OnInventoryChanged.Broadcast();
+				RecalculateWeight();
+				return EInventoryResult::Success;
 			}
 		}
 	}
 
-	// Marcar el slot principal con los datos completos del item
-	InventoryGrid[SlotIndex].ItemData = ItemData;
+	// Buscar slot libre (primero sin rotar, luego rotado)
+	int32 FreeSlot = FindFirstFreeSlot(ItemWidth, ItemHeight, false);
+	bool  bRotated = false;
 
+	if (FreeSlot == -1 && ItemWidth != ItemHeight)
+	{
+		FreeSlot = FindFirstFreeSlot(ItemHeight, ItemWidth, false);
+		bRotated  = (FreeSlot != -1);
+	}
+
+	if (FreeSlot == -1)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[Inventario] Sin espacio para: %s (%dx%d)"),
+			*ItemData.ItemDefinitionID.ToString(), ItemWidth, ItemHeight);
+		return EInventoryResult::NoSpace;
+	}
+
+	return PlaceItemAt(ItemData, FreeSlot, ItemWidth, ItemHeight, bRotated);
+}
+
+EInventoryResult UInventoryComponent::PlaceItemAt(const FItemData& ItemData, int32 SlotIndex,
+	int32 ItemWidth, int32 ItemHeight, bool bRotated)
+{
+	if (!GetOwner()->HasAuthority()) return EInventoryResult::NotAuthority;
+	if (!ItemData.IsValid())         return EInventoryResult::InvalidItem;
+	if (SlotIndex < 0 || SlotIndex >= Grid.Num()) return EInventoryResult::InvalidSlot;
+
+	const int32 EffW = bRotated ? ItemHeight : ItemWidth;
+	const int32 EffH = bRotated ? ItemWidth  : ItemHeight;
+
+	if (!CanFitAt(SlotIndex, EffW, EffH)) return EInventoryResult::SlotOccupied;
+
+	OccupyCells(SlotIndex, ItemData, EffW, EffH, bRotated, true);
+
+	RecalculateWeight();
 	OnItemAdded.Broadcast(ItemData, SlotIndex);
 	OnInventoryChanged.Broadcast();
-
-	UE_LOG(LogTemp, Log, TEXT("[ZonaRoja] Item añadido al inventario: %s en slot %d"),
-		*ItemData.ItemDefinitionID.ToString(), SlotIndex);
-	return true;
+	return EInventoryResult::Success;
 }
 
-bool UInventoryComponent::RemoveItem(const FGuid& ItemID)
+EInventoryResult UInventoryComponent::RemoveItem(const FGuid& ItemID)
 {
-	if (!GetOwner()->HasAuthority())
+	if (!GetOwner()->HasAuthority()) return EInventoryResult::NotAuthority;
+
+	// Solo buscar en slots raíz para evitar doble-borrado
+	for (int32 i = 0; i < Grid.Num(); ++i)
 	{
-		return false;
+		if (!Grid[i].bIsRootSlot)              continue;
+		if (Grid[i].ItemData.ID != ItemID)     continue;
+
+		const int32 EffW = Grid[i].GetEffectiveWidth();
+		const int32 EffH = Grid[i].GetEffectiveHeight();
+
+		OccupyCells(i, Grid[i].ItemData, EffW, EffH, Grid[i].bIsRotated, false);
+
+		RecalculateWeight();
+		OnItemRemoved.Broadcast(ItemID);
+		OnInventoryChanged.Broadcast();
+		return EInventoryResult::Success;
 	}
 
-	for (int32 i = 0; i < InventoryGrid.Num(); ++i)
+	return EInventoryResult::ItemNotFound;
+}
+
+EInventoryResult UInventoryComponent::MoveItem(int32 FromRootSlot, int32 ToRootSlot,
+	bool bRotateOnMove)
+{
+	if (!GetOwner()->HasAuthority()) return EInventoryResult::NotAuthority;
+	if (FromRootSlot == ToRootSlot)  return EInventoryResult::Success;
+
+	if (FromRootSlot < 0 || FromRootSlot >= Grid.Num() ||
+		ToRootSlot   < 0 || ToRootSlot   >= Grid.Num())
+		return EInventoryResult::InvalidSlot;
+
+	if (!Grid[FromRootSlot].bIsRootSlot)
+		return EInventoryResult::InvalidSlot;
+
+	const FInventorySlot SourceCopy = Grid[FromRootSlot];
+	const bool   NewRotation = SourceCopy.bIsRotated ^ bRotateOnMove;
+	const int32  NewEffW     = NewRotation ? SourceCopy.ItemHeight : SourceCopy.ItemWidth;
+	const int32  NewEffH     = NewRotation ? SourceCopy.ItemWidth  : SourceCopy.ItemHeight;
+
+	// Liberar celdas originales temporalmente
+	OccupyCells(FromRootSlot, SourceCopy.ItemData,
+		SourceCopy.GetEffectiveWidth(), SourceCopy.GetEffectiveHeight(),
+		SourceCopy.bIsRotated, false);
+
+	// Caso intercambio: el destino tiene otro item
+	if (Grid[ToRootSlot].bIsRootSlot)
 	{
-		if (InventoryGrid[i].bIsOccupied && InventoryGrid[i].ItemData.ID == ItemID)
+		const FInventorySlot DestCopy = Grid[ToRootSlot];
+
+		OccupyCells(ToRootSlot, DestCopy.ItemData,
+			DestCopy.GetEffectiveWidth(), DestCopy.GetEffectiveHeight(),
+			DestCopy.bIsRotated, false);
+
+		// Intentar colocar el item destino donde estaba el origen
+		if (!CanFitAt(FromRootSlot, DestCopy.GetEffectiveWidth(), DestCopy.GetEffectiveHeight()))
 		{
-			// Limpiar todas las celdas ocupadas por este item
-			const FItemData RemovedItem = InventoryGrid[i].ItemData;
-			const int32 Width = InventoryGrid[i].ItemWidth;
-			const int32 Height = InventoryGrid[i].ItemHeight;
-			const int32 StartRow = i / GridColumns;
-			const int32 StartCol = i % GridColumns;
-
-			for (int32 Row = StartRow; Row < StartRow + Height; ++Row)
-			{
-				for (int32 Col = StartCol; Col < StartCol + Width; ++Col)
-				{
-					const int32 CellIndex = Row * GridColumns + Col;
-					if (CellIndex < InventoryGrid.Num())
-					{
-						InventoryGrid[CellIndex].bIsOccupied = false;
-						InventoryGrid[CellIndex].ItemData = FItemData();
-						InventoryGrid[CellIndex].ItemWidth = 1;
-						InventoryGrid[CellIndex].ItemHeight = 1;
-					}
-				}
-			}
-
-			OnItemRemoved.Broadcast(ItemID);
-			OnInventoryChanged.Broadcast();
-			return true;
+			// Restaurar todo si no caben en swap
+			OccupyCells(FromRootSlot, SourceCopy.ItemData,
+				SourceCopy.GetEffectiveWidth(), SourceCopy.GetEffectiveHeight(),
+				SourceCopy.bIsRotated, true);
+			OccupyCells(ToRootSlot, DestCopy.ItemData,
+				DestCopy.GetEffectiveWidth(), DestCopy.GetEffectiveHeight(),
+				DestCopy.bIsRotated, true);
+			return EInventoryResult::SlotOccupied;
 		}
+
+		OccupyCells(FromRootSlot, DestCopy.ItemData,
+			DestCopy.GetEffectiveWidth(), DestCopy.GetEffectiveHeight(),
+			DestCopy.bIsRotated, true);
 	}
 
-	return false;
+	// Colocar el item origen en el destino
+	if (!CanFitAt(ToRootSlot, NewEffW, NewEffH))
+	{
+		// Restaurar origen
+		OccupyCells(FromRootSlot, SourceCopy.ItemData,
+			SourceCopy.GetEffectiveWidth(), SourceCopy.GetEffectiveHeight(),
+			SourceCopy.bIsRotated, true);
+		return EInventoryResult::SlotOccupied;
+	}
+
+	OccupyCells(ToRootSlot, SourceCopy.ItemData, NewEffW, NewEffH, NewRotation, true);
+
+	OnItemMoved.Broadcast(SourceCopy.ItemData.ID, ToRootSlot);
+	OnInventoryChanged.Broadcast();
+	return EInventoryResult::Success;
 }
 
-int32 UInventoryComponent::RemoveItemByDefinition(const FName& ItemDefinitionID, int32 Amount)
+EInventoryResult UInventoryComponent::SplitStack(const FGuid& ItemID, int32 Amount)
 {
-	if (!GetOwner()->HasAuthority())
+	if (!GetOwner()->HasAuthority()) return EInventoryResult::NotAuthority;
+
+	const int32 RootSlot = FindItemRootSlot(ItemID);
+	if (RootSlot == -1) return EInventoryResult::ItemNotFound;
+
+	FInventorySlot& Slot = Grid[RootSlot];
+	if (Slot.ItemData.StackCount <= 1)  return EInventoryResult::CannotStack;
+	if (Amount <= 0 || Amount >= Slot.ItemData.StackCount)
+		return EInventoryResult::InvalidItem;
+
+	// Crear nuevo item con la cantidad dividida
+	FItemData SplitItem(Slot.ItemData.ItemDefinitionID, Slot.ItemData.StackCount - Amount);
+	SplitItem.Durability = Slot.ItemData.Durability;
+
+	// Reducir el stack original
+	Slot.ItemData.StackCount = Amount;
+
+	// Añadir el nuevo stack al inventario
+	return TryAddItem(SplitItem, Slot.ItemWidth, Slot.ItemHeight);
+}
+
+int32 UInventoryComponent::RemoveAmountByDefinition(const FName& ItemDefinitionID, int32 Amount)
+{
+	if (!GetOwner()->HasAuthority()) return 0;
+
+	int32 Remaining = Amount;
+
+	// Ordenar slots por tamaño de stack ascendente para reducir fragmentación
+	TArray<int32> RootSlots;
+	for (int32 i = 0; i < Grid.Num(); ++i)
 	{
-		return 0;
+		if (Grid[i].bIsRootSlot && Grid[i].ItemData.ItemDefinitionID == ItemDefinitionID)
+			RootSlots.Add(i);
 	}
-
-	int32 RemovedCount = 0;
-
-	for (int32 i = 0; i < InventoryGrid.Num() && RemovedCount < Amount; ++i)
+	RootSlots.Sort([this](int32 A, int32 B)
 	{
-		if (InventoryGrid[i].bIsOccupied &&
-			InventoryGrid[i].ItemData.ItemDefinitionID == ItemDefinitionID)
+		return Grid[A].ItemData.StackCount < Grid[B].ItemData.StackCount;
+	});
+
+	for (int32 SlotIdx : RootSlots)
+	{
+		if (Remaining <= 0) break;
+
+		FInventorySlot& Slot = Grid[SlotIdx];
+		const int32 ToRemove = FMath::Min(Slot.ItemData.StackCount, Remaining);
+
+		if (ToRemove >= Slot.ItemData.StackCount)
 		{
-			const int32 StackCount = InventoryGrid[i].ItemData.StackCount;
-			const int32 ToRemove = FMath::Min(StackCount, Amount - RemovedCount);
-
-			if (ToRemove >= StackCount)
-			{
-				// Eliminar todo el stack
-				RemoveItem(InventoryGrid[i].ItemData.ID);
-				RemovedCount += StackCount;
-			}
-			else
-			{
-				// Reducir el stack
-				InventoryGrid[i].ItemData.StackCount -= ToRemove;
-				RemovedCount += ToRemove;
-				OnInventoryChanged.Broadcast();
-			}
+			const FGuid RemovedID = Slot.ItemData.ID;
+			OccupyCells(SlotIdx, Slot.ItemData,
+				Slot.GetEffectiveWidth(), Slot.GetEffectiveHeight(),
+				Slot.bIsRotated, false);
+			OnItemRemoved.Broadcast(RemovedID);
 		}
+		else
+		{
+			Slot.ItemData.StackCount -= ToRemove;
+		}
+
+		Remaining -= ToRemove;
 	}
 
-	return RemovedCount;
+	const int32 Removed = Amount - Remaining;
+	if (Removed > 0)
+	{
+		RecalculateWeight();
+		OnInventoryChanged.Broadcast();
+	}
+	return Removed;
 }
 
-bool UInventoryComponent::EquipItem(const FGuid& ItemID, EEquipmentSlot Slot)
+EInventoryResult UInventoryComponent::EquipItem(const FGuid& ItemID, EEquipmentSlot Slot)
 {
-	if (!GetOwner()->HasAuthority())
-	{
-		return false;
-	}
+	if (!GetOwner()->HasAuthority()) return EInventoryResult::NotAuthority;
 
-	// Buscar el item en el inventario
 	FItemData ItemToEquip;
-	if (!FindItem(ItemID, ItemToEquip))
+	if (!FindItem(ItemID, ItemToEquip)) return EInventoryResult::ItemNotFound;
+
+	FItemData* EquipSlotPtr = GetEquipmentSlotPtr(Slot);
+	if (!EquipSlotPtr) return EInventoryResult::InvalidSlot;
+
+	// Si la ranura ya tiene algo, devolver al inventario
+	if (EquipSlotPtr->IsValid())
 	{
-		return false;
+		const FItemData OldItem = *EquipSlotPtr;
+		*EquipSlotPtr = FItemData(); // Vaciar antes de intentar añadir
+
+		// Si no hay espacio de vuelta, abortar
+		const EInventoryResult AddResult = TryAddItem(OldItem, 1, 1);
+		if (AddResult != EInventoryResult::Success)
+		{
+			*EquipSlotPtr = OldItem; // Restaurar
+			return EInventoryResult::NoSpace;
+		}
 	}
 
-	// Si la ranura ya tiene un item, intercambiarlos
-	FItemData* CurrentEquipped = nullptr;
-	switch (Slot)
-	{
-	case EEquipmentSlot::PrimaryWeapon:   CurrentEquipped = &EquipmentSlots.PrimaryWeapon;   break;
-	case EEquipmentSlot::SecondaryWeapon: CurrentEquipped = &EquipmentSlots.SecondaryWeapon; break;
-	case EEquipmentSlot::Holster:         CurrentEquipped = &EquipmentSlots.Holster;         break;
-	case EEquipmentSlot::Helmet:          CurrentEquipped = &EquipmentSlots.Helmet;          break;
-	case EEquipmentSlot::BodyArmor:       CurrentEquipped = &EquipmentSlots.BodyArmor;       break;
-	case EEquipmentSlot::Vest:            CurrentEquipped = &EquipmentSlots.Vest;            break;
-	case EEquipmentSlot::Backpack:        CurrentEquipped = &EquipmentSlots.Backpack;        break;
-	case EEquipmentSlot::LeftPocket:      CurrentEquipped = &EquipmentSlots.LeftPocket;      break;
-	case EEquipmentSlot::RightPocket:     CurrentEquipped = &EquipmentSlots.RightPocket;     break;
-	default: return false;
-	}
-
-	// Si hay algo equipado, volver al inventario
-	if (CurrentEquipped && CurrentEquipped->IsValid())
-	{
-		TryAddItem(*CurrentEquipped);
-	}
-
-	// Equipar el nuevo item
-	*CurrentEquipped = ItemToEquip;
-
-	// Quitar del inventario
 	RemoveItem(ItemID);
+	*EquipSlotPtr = ItemToEquip;
 
+	// Si es mochila o chaleco, recalcular tamaño del grid
+	if (Slot == EEquipmentSlot::Backpack || Slot == EEquipmentSlot::Vest)
+	{
+		RecalculateGridSize();
+	}
+
+	RecalculateWeight();
 	OnEquipmentChanged.Broadcast(Slot, ItemToEquip);
-	return true;
+	OnInventoryChanged.Broadcast();
+	return EInventoryResult::Success;
 }
 
-bool UInventoryComponent::UnequipItem(EEquipmentSlot Slot)
+EInventoryResult UInventoryComponent::UnequipItem(EEquipmentSlot Slot)
 {
-	if (!GetOwner()->HasAuthority())
+	if (!GetOwner()->HasAuthority()) return EInventoryResult::NotAuthority;
+
+	FItemData* EquipSlotPtr = GetEquipmentSlotPtr(Slot);
+	if (!EquipSlotPtr || !EquipSlotPtr->IsValid()) return EInventoryResult::ItemNotFound;
+
+	const FItemData ItemToReturn = *EquipSlotPtr;
+	const EInventoryResult Result = TryAddItem(ItemToReturn, 1, 1);
+
+	if (Result != EInventoryResult::Success) return EInventoryResult::NoSpace;
+
+	*EquipSlotPtr = FItemData();
+
+	if (Slot == EEquipmentSlot::Backpack || Slot == EEquipmentSlot::Vest)
 	{
-		return false;
+		RecalculateGridSize();
 	}
 
-	FItemData* CurrentEquipped = nullptr;
-	switch (Slot)
-	{
-	case EEquipmentSlot::PrimaryWeapon:   CurrentEquipped = &EquipmentSlots.PrimaryWeapon;   break;
-	case EEquipmentSlot::SecondaryWeapon: CurrentEquipped = &EquipmentSlots.SecondaryWeapon; break;
-	case EEquipmentSlot::Holster:         CurrentEquipped = &EquipmentSlots.Holster;         break;
-	case EEquipmentSlot::Helmet:          CurrentEquipped = &EquipmentSlots.Helmet;          break;
-	case EEquipmentSlot::BodyArmor:       CurrentEquipped = &EquipmentSlots.BodyArmor;       break;
-	case EEquipmentSlot::Vest:            CurrentEquipped = &EquipmentSlots.Vest;            break;
-	case EEquipmentSlot::Backpack:        CurrentEquipped = &EquipmentSlots.Backpack;        break;
-	case EEquipmentSlot::LeftPocket:      CurrentEquipped = &EquipmentSlots.LeftPocket;      break;
-	case EEquipmentSlot::RightPocket:     CurrentEquipped = &EquipmentSlots.RightPocket;     break;
-	default: return false;
-	}
-
-	if (!CurrentEquipped || !CurrentEquipped->IsValid())
-	{
-		return false; // La ranura está vacía
-	}
-
-	if (TryAddItem(*CurrentEquipped))
-	{
-		*CurrentEquipped = FItemData(); // Vaciar la ranura
-		OnEquipmentChanged.Broadcast(Slot, FItemData());
-		return true;
-	}
-
-	return false; // No hay espacio en el inventario
+	RecalculateWeight();
+	OnEquipmentChanged.Broadcast(Slot, FItemData());
+	OnInventoryChanged.Broadcast();
+	return EInventoryResult::Success;
 }
 
-bool UInventoryComponent::MoveItem(int32 FromSlot, int32 ToSlot)
+void UInventoryComponent::AutoSort()
 {
-	if (!GetOwner()->HasAuthority())
+	if (!GetOwner()->HasAuthority()) return;
+
+	// Extraer todos los items con sus dimensiones
+	struct FSortEntry { FItemData Item; int32 W; int32 H; };
+	TArray<FSortEntry> Items;
+
+	for (int32 i = 0; i < Grid.Num(); ++i)
 	{
-		return false;
+		if (!Grid[i].bIsRootSlot) continue;
+		Items.Add({ Grid[i].ItemData, Grid[i].GetEffectiveWidth(), Grid[i].GetEffectiveHeight() });
 	}
 
-	if (FromSlot < 0 || FromSlot >= InventoryGrid.Num() ||
-		ToSlot < 0 || ToSlot >= InventoryGrid.Num())
+	// Ordenar por área descendente (items grandes primero)
+	Items.Sort([](const FSortEntry& A, const FSortEntry& B)
 	{
-		return false;
+		return (A.W * A.H) > (B.W * B.H);
+	});
+
+	// Limpiar el grid y recolocar en orden
+	RebuildGrid();
+
+	for (const FSortEntry& Entry : Items)
+	{
+		TryAddItem(Entry.Item, Entry.W, Entry.H);
 	}
 
-	if (!InventoryGrid[FromSlot].bIsOccupied)
-	{
-		return false; // El slot de origen está vacío
-	}
+	OnInventoryChanged.Broadcast();
+}
 
-	// Guardar datos del item origen
-	const FInventorySlot SourceSlot = InventoryGrid[FromSlot];
+// ============================================================
+// RPCS CLIENTE → SERVIDOR
+// ============================================================
 
-	// Verificar si el destino puede contener el item
-	if (!CanFitItemAt(ToSlot, SourceSlot.ItemWidth, SourceSlot.ItemHeight))
-	{
-		return false;
-	}
+void UInventoryComponent::ServerRequestMoveItem_Implementation(
+	int32 FromRootSlot, int32 ToRootSlot, bool bRotate)
+{
+	MoveItem(FromRootSlot, ToRootSlot, bRotate);
+}
 
-	// Eliminar del origen y añadir al destino
-	RemoveItem(SourceSlot.ItemData.ID);
-	return AddItemToSlot(SourceSlot.ItemData, ToSlot, SourceSlot.ItemWidth, SourceSlot.ItemHeight);
+void UInventoryComponent::ServerRequestDropItem_Implementation(FGuid ItemID)
+{
+	// TODO: hacer spawn del WorldItem en el suelo antes de eliminar
+	RemoveItem(ItemID);
+}
+
+void UInventoryComponent::ServerRequestSplitStack_Implementation(FGuid ItemID, int32 Amount)
+{
+	SplitStack(ItemID, Amount);
+}
+
+void UInventoryComponent::ServerRequestEquipItem_Implementation(FGuid ItemID, EEquipmentSlot Slot)
+{
+	EquipItem(ItemID, Slot);
+}
+
+void UInventoryComponent::ServerRequestUnequipItem_Implementation(EEquipmentSlot Slot)
+{
+	UnequipItem(Slot);
+}
+
+void UInventoryComponent::ServerRequestAutoSort_Implementation()
+{
+	AutoSort();
 }
 
 // ============================================================
@@ -313,9 +425,9 @@ bool UInventoryComponent::MoveItem(int32 FromSlot, int32 ToSlot)
 
 bool UInventoryComponent::FindItem(const FGuid& ItemID, FItemData& OutItemData) const
 {
-	for (const FInventorySlot& Slot : InventoryGrid)
+	for (const FInventorySlot& Slot : Grid)
 	{
-		if (Slot.bIsOccupied && Slot.ItemData.ID == ItemID)
+		if (Slot.bIsRootSlot && Slot.ItemData.ID == ItemID)
 		{
 			OutItemData = Slot.ItemData;
 			return true;
@@ -324,127 +436,281 @@ bool UInventoryComponent::FindItem(const FGuid& ItemID, FItemData& OutItemData) 
 	return false;
 }
 
+int32 UInventoryComponent::FindItemRootSlot(const FGuid& ItemID) const
+{
+	for (int32 i = 0; i < Grid.Num(); ++i)
+	{
+		if (Grid[i].bIsRootSlot && Grid[i].ItemData.ID == ItemID)
+			return i;
+	}
+	return -1;
+}
+
 int32 UInventoryComponent::GetItemCount(const FName& ItemDefinitionID) const
 {
-	int32 Count = 0;
-	// Evitar contar slots que son "continuación" del mismo item
-	TSet<FGuid> CountedIDs;
-
-	for (const FInventorySlot& Slot : InventoryGrid)
+	int32 Total = 0;
+	for (const FInventorySlot& Slot : Grid)
 	{
-		if (Slot.bIsOccupied &&
-			Slot.ItemData.ItemDefinitionID == ItemDefinitionID &&
-			!CountedIDs.Contains(Slot.ItemData.ID))
-		{
-			Count += Slot.ItemData.StackCount;
-			CountedIDs.Add(Slot.ItemData.ID);
-		}
+		if (Slot.bIsRootSlot && Slot.ItemData.ItemDefinitionID == ItemDefinitionID)
+			Total += Slot.ItemData.StackCount;
 	}
-	return Count;
+	return Total;
 }
 
 bool UInventoryComponent::HasSpaceFor(int32 ItemWidth, int32 ItemHeight) const
 {
-	int32 IgnoredSlot = -1;
-	return FindFreeSlot(ItemWidth, ItemHeight, IgnoredSlot);
+	return FindFirstFreeSlot(ItemWidth, ItemHeight, false) != -1
+		|| FindFirstFreeSlot(ItemHeight, ItemWidth, false) != -1;
 }
 
 bool UInventoryComponent::GetEquippedItem(EEquipmentSlot Slot, FItemData& OutItemData) const
 {
-	switch (Slot)
-	{
-	case EEquipmentSlot::PrimaryWeapon:   OutItemData = EquipmentSlots.PrimaryWeapon;   break;
-	case EEquipmentSlot::SecondaryWeapon: OutItemData = EquipmentSlots.SecondaryWeapon; break;
-	case EEquipmentSlot::Holster:         OutItemData = EquipmentSlots.Holster;         break;
-	case EEquipmentSlot::Helmet:          OutItemData = EquipmentSlots.Helmet;          break;
-	case EEquipmentSlot::BodyArmor:       OutItemData = EquipmentSlots.BodyArmor;       break;
-	case EEquipmentSlot::Vest:            OutItemData = EquipmentSlots.Vest;            break;
-	case EEquipmentSlot::Backpack:        OutItemData = EquipmentSlots.Backpack;        break;
-	case EEquipmentSlot::LeftPocket:      OutItemData = EquipmentSlots.LeftPocket;      break;
-	case EEquipmentSlot::RightPocket:     OutItemData = EquipmentSlots.RightPocket;     break;
-	default: return false;
-	}
-	return OutItemData.IsValid();
+	const FItemData* Ptr = GetEquipmentSlotPtr(Slot);
+	if (!Ptr) return false;
+	OutItemData = *Ptr;
+	return Ptr->IsValid();
 }
 
-int32 UInventoryComponent::GetUsedSlotCount() const
+float UInventoryComponent::GetWeightRatio() const
 {
-	int32 UsedCount = 0;
-	for (const FInventorySlot& Slot : InventoryGrid)
+	const int32 MaxW = GetMaxWeightGrams();
+	return (MaxW > 0) ? static_cast<float>(CurrentWeightGrams) / MaxW : 0.0f;
+}
+
+int32 UInventoryComponent::GetFreeSlotCount() const
+{
+	int32 Free = 0;
+	for (const FInventorySlot& Slot : Grid)
 	{
-		if (Slot.bIsOccupied)
-		{
-			UsedCount++;
-		}
+		if (!Slot.bIsOccupied) ++Free;
 	}
-	return UsedCount;
+	return Free;
+}
+
+TArray<FItemData> UInventoryComponent::GetAllItems() const
+{
+	TArray<FItemData> Result;
+	for (const FInventorySlot& Slot : Grid)
+	{
+		if (Slot.bIsRootSlot)
+			Result.Add(Slot.ItemData);
+	}
+	return Result;
+}
+
+int32 UInventoryComponent::GetTotalLootValueCZ() const
+{
+	// TODO: multiplicar StackCount x BaseValueCZ de DT_ItemDefinitions por cada item raíz
+	return 0;
 }
 
 // ============================================================
 // UTILIDADES INTERNAS
 // ============================================================
 
-bool UInventoryComponent::FindFreeSlot(int32 ItemWidth, int32 ItemHeight, int32& OutSlotIndex) const
+void UInventoryComponent::RebuildGrid()
 {
-	for (int32 Row = 0; Row <= GridRows - ItemHeight; ++Row)
+	const int32 TotalSlots = GridColumns * GridRows;
+	Grid.SetNum(TotalSlots);
+
+	for (int32 i = 0; i < TotalSlots; ++i)
 	{
-		for (int32 Col = 0; Col <= GridColumns - ItemWidth; ++Col)
-		{
-			const int32 SlotIndex = Row * GridColumns + Col;
-			if (CanFitItemAt(SlotIndex, ItemWidth, ItemHeight))
-			{
-				OutSlotIndex = SlotIndex;
-				return true;
-			}
-		}
+		Grid[i].bIsOccupied  = false;
+		Grid[i].bIsRootSlot  = false;
+		Grid[i].bIsRotated   = false;
+		Grid[i].SlotIndex    = i;
+		Grid[i].ItemData     = FItemData();
+		Grid[i].ItemWidth    = 1;
+		Grid[i].ItemHeight   = 1;
 	}
-	return false;
 }
 
-bool UInventoryComponent::CanFitItemAt(int32 StartSlot, int32 ItemWidth, int32 ItemHeight) const
+void UInventoryComponent::RecalculateGridSize()
 {
-	if (StartSlot < 0 || StartSlot >= InventoryGrid.Num())
+	int32 NewColumns = BaseGridColumns;
+	int32 NewRows    = BaseGridRows;
+
+	// Chaleco añade columnas extra
+	// TODO: consultar ContainerColumns/ContainerRows desde DT_ItemDefinitions
+	// Por ahora valores de ejemplo hardcodeados hasta integrar DataTable
+	if (Equipment.Vest.IsValid())
 	{
-		return false;
+		NewColumns += 2; // Chaleco táctico estándar añade 2 columnas
+		NewRows    += 1;
+	}
+	if (Equipment.Backpack.IsValid())
+	{
+		NewColumns += 3; // Mochila estándar añade 3 columnas y 4 filas
+		NewRows    += 4;
 	}
 
-	const int32 StartRow = StartSlot / GridColumns;
-	const int32 StartCol = StartSlot % GridColumns;
+	if (NewColumns == GridColumns && NewRows == GridRows) return;
 
-	// Verificar que el item no se salga de los límites de la cuadrícula
-	if (StartCol + ItemWidth > GridColumns || StartRow + ItemHeight > GridRows)
+	// Guardar items actuales para recolocarlos
+	TArray<FItemData> SavedItems;
+	TArray<int32>     SavedWidths, SavedHeights;
+
+	for (int32 i = 0; i < Grid.Num(); ++i)
 	{
-		return false;
+		if (!Grid[i].bIsRootSlot) continue;
+		SavedItems.Add(Grid[i].ItemData);
+		SavedWidths.Add(Grid[i].ItemWidth);
+		SavedHeights.Add(Grid[i].ItemHeight);
 	}
 
-	// Verificar que todas las celdas necesarias estén libres
-	for (int32 Row = StartRow; Row < StartRow + ItemHeight; ++Row)
+	GridColumns = NewColumns;
+	GridRows    = NewRows;
+	RebuildGrid();
+
+	for (int32 j = 0; j < SavedItems.Num(); ++j)
 	{
-		for (int32 Col = StartCol; Col < StartCol + ItemWidth; ++Col)
+		TryAddItem(SavedItems[j], SavedWidths[j], SavedHeights[j]);
+	}
+}
+
+void UInventoryComponent::RecalculateWeight()
+{
+	int32 TotalGrams = 0;
+
+	for (const FInventorySlot& Slot : Grid)
+	{
+		if (!Slot.bIsRootSlot) continue;
+		// TODO: leer WeightGrams * StackCount desde DT_ItemDefinitions
+		// Por ahora usamos un peso fijo de 500g por item hasta integrar DataTable
+		TotalGrams += 500 * Slot.ItemData.StackCount;
+	}
+
+	// Sumar peso del equipo corporal
+	auto AddEquipWeight = [&](const FItemData& Item)
+	{
+		if (Item.IsValid()) TotalGrams += 500; // placeholder
+	};
+	AddEquipWeight(Equipment.Helmet);
+	AddEquipWeight(Equipment.BodyArmor);
+	AddEquipWeight(Equipment.Vest);
+	AddEquipWeight(Equipment.Backpack);
+	AddEquipWeight(Equipment.PrimaryWeapon);
+	AddEquipWeight(Equipment.SecondaryWeapon);
+	AddEquipWeight(Equipment.Holster);
+
+	CurrentWeightGrams = TotalGrams;
+	OnWeightChanged.Broadcast(GetCurrentWeightKg());
+}
+
+int32 UInventoryComponent::GetMaxWeightGrams() const
+{
+	int32 Max = BaseMaxWeightGrams;
+	// TODO: añadir modificadores de habilidades (Fuerza, etc.)
+	return Max;
+}
+
+int32 UInventoryComponent::FindFirstFreeSlot(int32 EffW, int32 EffH, bool /*bTryRotated*/) const
+{
+	for (int32 Row = 0; Row <= GridRows - EffH; ++Row)
+	{
+		for (int32 Col = 0; Col <= GridColumns - EffW; ++Col)
 		{
-			const int32 CellIndex = Row * GridColumns + Col;
-			if (CellIndex >= InventoryGrid.Num() || InventoryGrid[CellIndex].bIsOccupied)
-			{
-				return false;
-			}
+			const int32 SlotIndex = Row * GridColumns + Col;
+			if (CanFitAt(SlotIndex, EffW, EffH))
+				return SlotIndex;
 		}
 	}
+	return -1;
+}
 
+bool UInventoryComponent::CanFitAt(int32 SlotIndex, int32 EffW, int32 EffH) const
+{
+	if (SlotIndex < 0 || SlotIndex >= Grid.Num()) return false;
+
+	const int32 StartRow = SlotIndex / GridColumns;
+	const int32 StartCol = SlotIndex % GridColumns;
+
+	if (StartCol + EffW > GridColumns) return false;
+	if (StartRow + EffH > GridRows)    return false;
+
+	for (int32 Row = StartRow; Row < StartRow + EffH; ++Row)
+	{
+		for (int32 Col = StartCol; Col < StartCol + EffW; ++Col)
+		{
+			const int32 Cell = Row * GridColumns + Col;
+			if (Cell >= Grid.Num() || Grid[Cell].bIsOccupied) return false;
+		}
+	}
 	return true;
 }
 
+void UInventoryComponent::OccupyCells(int32 RootSlot, const FItemData& ItemData,
+	int32 EffW, int32 EffH, bool bRotated, bool bOccupy)
+{
+	const int32 StartRow = RootSlot / GridColumns;
+	const int32 StartCol = RootSlot % GridColumns;
+
+	for (int32 Row = StartRow; Row < StartRow + EffH; ++Row)
+	{
+		for (int32 Col = StartCol; Col < StartCol + EffW; ++Col)
+		{
+			const int32 Cell = Row * GridColumns + Col;
+			if (Cell < 0 || Cell >= Grid.Num()) continue;
+
+			if (bOccupy)
+			{
+				Grid[Cell].bIsOccupied = true;
+				Grid[Cell].ItemData    = ItemData;
+				Grid[Cell].ItemWidth   = bRotated ? EffH : EffW;
+				Grid[Cell].ItemHeight  = bRotated ? EffW : EffH;
+				Grid[Cell].bIsRotated  = bRotated;
+				Grid[Cell].bIsRootSlot = (Cell == RootSlot);
+			}
+			else
+			{
+				Grid[Cell].bIsOccupied = false;
+				Grid[Cell].bIsRootSlot = false;
+				Grid[Cell].bIsRotated  = false;
+				Grid[Cell].ItemData    = FItemData();
+				Grid[Cell].ItemWidth   = 1;
+				Grid[Cell].ItemHeight  = 1;
+			}
+		}
+	}
+}
+
+FItemData* UInventoryComponent::GetEquipmentSlotPtr(EEquipmentSlot Slot)
+{
+	switch (Slot)
+	{
+	case EEquipmentSlot::PrimaryWeapon:   return &Equipment.PrimaryWeapon;
+	case EEquipmentSlot::SecondaryWeapon: return &Equipment.SecondaryWeapon;
+	case EEquipmentSlot::Holster:         return &Equipment.Holster;
+	case EEquipmentSlot::Helmet:          return &Equipment.Helmet;
+	case EEquipmentSlot::BodyArmor:       return &Equipment.BodyArmor;
+	case EEquipmentSlot::Vest:            return &Equipment.Vest;
+	case EEquipmentSlot::Backpack:        return &Equipment.Backpack;
+	case EEquipmentSlot::LeftPocket:      return &Equipment.LeftPocket;
+	case EEquipmentSlot::RightPocket:     return &Equipment.RightPocket;
+	default:                              return nullptr;
+	}
+}
+
+const FItemData* UInventoryComponent::GetEquipmentSlotPtr(EEquipmentSlot Slot) const
+{
+	return const_cast<UInventoryComponent*>(this)->GetEquipmentSlotPtr(Slot);
+}
+
 // ============================================================
-// CALLBACKS DE REPLICACION
+// CALLBACKS DE REPLICACIÓN
 // ============================================================
 
-void UInventoryComponent::OnRep_Inventory()
+void UInventoryComponent::OnRep_Grid()
 {
-	// Notificar a la UI que el inventario cambió en el cliente
 	OnInventoryChanged.Broadcast();
 }
 
 void UInventoryComponent::OnRep_Equipment()
 {
-	// La UI de equipamiento se actualiza en el Blueprint del personaje
 	OnInventoryChanged.Broadcast();
+}
+
+void UInventoryComponent::OnRep_Weight()
+{
+	OnWeightChanged.Broadcast(GetCurrentWeightKg());
 }

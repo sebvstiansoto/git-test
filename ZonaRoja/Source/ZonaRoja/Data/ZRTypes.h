@@ -150,7 +150,7 @@ struct ZONAROJA_API FItemData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
 	FGuid ID;
 
-	/** ID de la definición del objeto (referencia a DataTable) */
+	/** ID de la definición del objeto (referencia a DataTable DT_ItemDefinitions) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
 	FName ItemDefinitionID;
 
@@ -162,12 +162,20 @@ struct ZONAROJA_API FItemData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
 	TArray<FGuid> AttachmentIDs;
 
+	/**
+	 * Durabilidad actual (0–100). Para armas y armaduras.
+	 * -1 indica que el item no tiene durabilidad (consumibles, llaves, etc.)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
+	float Durability = 100.0f;
+
 	/** Constructor por defecto */
 	FItemData()
 	{
 		ID = FGuid::NewGuid();
 		ItemDefinitionID = NAME_None;
 		StackCount = 1;
+		Durability = 100.0f;
 	}
 
 	/** Constructor con ID de definición */
@@ -176,6 +184,7 @@ struct ZONAROJA_API FItemData
 		ID = FGuid::NewGuid();
 		ItemDefinitionID = InDefinitionID;
 		StackCount = InStackCount;
+		Durability = 100.0f;
 	}
 
 	/** Verifica si el item es válido */
@@ -183,6 +192,78 @@ struct ZONAROJA_API FItemData
 	{
 		return ID.IsValid() && ItemDefinitionID != NAME_None;
 	}
+};
+
+// ============================================================
+// FILA DE DATA TABLE: DEFINICION DE ITEM
+// ============================================================
+
+/**
+ * Fila del DataTable DT_ItemDefinitions.
+ * Define las propiedades estáticas de cada tipo de item del juego.
+ * Las instancias en el inventario (FItemData) referencian este ID.
+ */
+USTRUCT(BlueprintType)
+struct ZONAROJA_API FItemDefinitionRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	/** Nombre visible para el jugador */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	FText DisplayName;
+
+	/** Descripción del item en el menú de inspección */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	FText Description;
+
+	/** Tipo de item (determina comportamientos) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	EItemType ItemType = EItemType::Misc;
+
+	/** Nivel de rareza (afecta el color del borde en la UI) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	EItemTier Tier = EItemTier::Common;
+
+	/** Peso en gramos (se suma al peso total del jugador) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	int32 WeightGrams = 500;
+
+	/** Tamaño en la cuadrícula: X=columnas, Y=filas */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	FIntPoint GridSize = FIntPoint(1, 1);
+
+	/** Máximo de unidades por stack (1 = no apilable) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	int32 MaxStackSize = 1;
+
+	/** Valor base en CZ (moneda del juego) para traders y seguros */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	int32 BaseValueCZ = 100;
+
+	/** Si el item puede asegurarse antes de la raid */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	bool bCanBeInsured = true;
+
+	/** Si es un item de misión (no se puede vender ni desechar) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición")
+	bool bIsQuestItem = false;
+
+	/** Textura del icono en la UI del inventario */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición|Visual")
+	TSoftObjectPtr<UTexture2D> ThumbnailTexture;
+
+	/**
+	 * Para chalecos y mochilas: columnas de sub-inventario que añaden al jugador.
+	 * 0 = no añade inventario extra.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición|Contenedor")
+	int32 ContainerColumns = 0;
+
+	/** Filas de sub-inventario que añade el contenedor */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Definición|Contenedor")
+	int32 ContainerRows = 0;
+
+	FItemDefinitionRow() {}
 };
 
 /** Ranura individual en el inventario del jugador */
@@ -199,6 +280,14 @@ struct ZONAROJA_API FInventorySlot
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventario")
 	bool bIsOccupied = false;
 
+	/**
+	 * Solo true en la celda superior-izquierda del item (su "raíz").
+	 * Las celdas secundarias almacenan el mismo ItemData pero bIsRootSlot=false.
+	 * RemoveItem y FindItem deben operar SOLO sobre celdas raíz.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventario")
+	bool bIsRootSlot = false;
+
 	/** Índice de la ranura en la cuadrícula del inventario */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventario")
 	int32 SlotIndex = -1;
@@ -211,7 +300,16 @@ struct ZONAROJA_API FInventorySlot
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventario")
 	int32 ItemHeight = 1;
 
+	/** Si el item está rotado 90° (ancho y alto intercambiados al colocar) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventario")
+	bool bIsRotated = false;
+
 	FInventorySlot() {}
+
+	/** Ancho efectivo en la cuadrícula teniendo en cuenta la rotación */
+	int32 GetEffectiveWidth()  const { return bIsRotated ? ItemHeight : ItemWidth; }
+	/** Alto efectivo en la cuadrícula teniendo en cuenta la rotación */
+	int32 GetEffectiveHeight() const { return bIsRotated ? ItemWidth  : ItemHeight; }
 };
 
 /** Estructura de ranuras de equipamiento del personaje */

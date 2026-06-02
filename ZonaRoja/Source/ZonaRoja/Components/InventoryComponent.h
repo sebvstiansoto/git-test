@@ -1,6 +1,6 @@
 // InventoryComponent.h
-// Componente de inventario tipo cuadrícula con gestión de espacio
-// Soporta items de múltiples celdas, equipamiento y apilamiento
+// Inventario tipo cuadrícula con peso, rotación, split de stacks,
+// sub-inventarios de contenedor y RPCs servidor-autoridad.
 
 #pragma once
 
@@ -9,29 +9,59 @@
 #include "Data/ZRTypes.h"
 #include "InventoryComponent.generated.h"
 
-// ---------------------------------------------------------
+// ============================================================
+// RESULTADO DE OPERACION DE INVENTARIO
+// ============================================================
+
+UENUM(BlueprintType)
+enum class EInventoryResult : uint8
+{
+	Success				UMETA(DisplayName = "Éxito"),
+	NoSpace				UMETA(DisplayName = "Sin Espacio"),
+	ItemNotFound		UMETA(DisplayName = "Item No Encontrado"),
+	InvalidSlot			UMETA(DisplayName = "Ranura Inválida"),
+	SlotOccupied		UMETA(DisplayName = "Ranura Ocupada"),
+	WeightExceeded		UMETA(DisplayName = "Peso Excedido"),
+	NotAuthority		UMETA(DisplayName = "Sin Autoridad"),
+	InvalidItem			UMETA(DisplayName = "Item Inválido"),
+	StackFull			UMETA(DisplayName = "Stack Lleno"),
+	CannotStack			UMETA(DisplayName = "No Apilable"),
+};
+
+// ============================================================
 // DELEGADOS
-// ---------------------------------------------------------
+// ============================================================
 
-/** Delegado cuando se añade un item al inventario */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnItemAdded,
-	const FItemData&, AddedItem, int32, SlotIndex);
+	const FItemData&, AddedItem, int32, RootSlotIndex);
 
-/** Delegado cuando se elimina un item del inventario */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnItemRemoved,
-	const FGuid&, RemovedItemID);
+	FGuid, RemovedItemID);
 
-/** Delegado cuando cambia el equipamiento */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnItemMoved,
+	FGuid, ItemID, int32, NewRootSlotIndex);
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEquipmentChanged,
 	EEquipmentSlot, ChangedSlot, const FItemData&, NewItem);
 
-/** Delegado cuando el inventario cambia (para actualizar la UI) */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInventoryChanged);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWeightChanged,
+	float, NewWeightKg);
+
+// ============================================================
+// COMPONENTE DE INVENTARIO
+// ============================================================
 
 /**
  * UInventoryComponent
- * Gestiona el inventario tipo cuadrícula del jugador.
- * Similar al sistema de Escape from Tarkov: items de distinto tamaño en una rejilla.
+ *
+ * Inventario de cuadrícula bidimensional para extracción shooter.
+ * - Items de múltiples celdas con rotación opcional
+ * - Sistema de peso con penalizaciones de movimiento
+ * - Sub-inventarios dinámicos (mochila, chaleco)
+ * - Todas las mutaciones son server-authoritative
+ * - RPCs para operaciones iniciadas por el cliente
  */
 UCLASS(ClassGroup = (ZonaRoja), meta = (BlueprintSpawnableComponent))
 class ZONAROJA_API UInventoryComponent : public UActorComponent
@@ -41,151 +71,193 @@ class ZONAROJA_API UInventoryComponent : public UActorComponent
 public:
 	UInventoryComponent();
 
-	// ---------------------------------------------------------
-	// CONFIGURACION
-	// ---------------------------------------------------------
+	// ============================================================
+	// CONFIGURACION (servidor y cliente)
+	// ============================================================
 
-	/** Número de columnas de la cuadrícula de inventario principal */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventario|Configuración")
-	int32 GridColumns;
+	/** Columnas de la cuadrícula base (sin contenedores equipados) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventario|Config")
+	int32 BaseGridColumns = 5;
 
-	/** Número de filas de la cuadrícula de inventario principal */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventario|Configuración")
-	int32 GridRows;
+	/** Filas de la cuadrícula base */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventario|Config")
+	int32 BaseGridRows = 3;
 
-	// ---------------------------------------------------------
-	// ESTADO (replicado)
-	// ---------------------------------------------------------
+	/** Peso máximo base en gramos (sin modificadores de equipo) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventario|Config")
+	int32 BaseMaxWeightGrams = 40000;
 
-	/** Cuadrícula de ranuras del inventario */
-	UPROPERTY(ReplicatedUsing = OnRep_Inventory, BlueprintReadOnly, Category = "Inventario|Estado")
-	TArray<FInventorySlot> InventoryGrid;
+	// ============================================================
+	// ESTADO REPLICADO
+	// ============================================================
 
-	/** Ranuras de equipamiento del personaje */
+	/** Cuadrícula de slots del inventario (incluye slots de contenedores equipados) */
+	UPROPERTY(ReplicatedUsing = OnRep_Grid, BlueprintReadOnly, Category = "Inventario|Estado")
+	TArray<FInventorySlot> Grid;
+
+	/** Ranuras de equipamiento del cuerpo */
 	UPROPERTY(ReplicatedUsing = OnRep_Equipment, BlueprintReadOnly, Category = "Inventario|Estado")
-	FEquipmentSlots EquipmentSlots;
+	FEquipmentSlots Equipment;
 
-	// ---------------------------------------------------------
-	// FUNCIONES PRINCIPALES
-	// ---------------------------------------------------------
+	/** Peso total actual del inventario en gramos */
+	UPROPERTY(ReplicatedUsing = OnRep_Weight, BlueprintReadOnly, Category = "Inventario|Estado")
+	int32 CurrentWeightGrams = 0;
+
+	/** Dimensiones actuales de la cuadrícula (pueden cambiar al equipar mochila/chaleco) */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Inventario|Estado")
+	int32 GridColumns = 5;
+
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Inventario|Estado")
+	int32 GridRows = 3;
+
+	// ============================================================
+	// OPERACIONES PRINCIPALES (solo servidor)
+	// ============================================================
 
 	/**
-	 * Intenta añadir un item al inventario encontrando espacio libre.
-	 * @param ItemData Datos del item a añadir
-	 * @param ItemWidth Ancho del item en celdas (predeterminado 1)
-	 * @param ItemHeight Alto del item en celdas (predeterminado 1)
-	 * @return true si el item fue añadido con éxito
+	 * Intenta añadir un item al primer slot libre encontrando automáticamente
+	 * su posición. Si el item es apilable y ya existe en el inventario,
+	 * primero intenta sumar al stack existente.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Inventario")
-	bool TryAddItem(const FItemData& ItemData, int32 ItemWidth = 1, int32 ItemHeight = 1);
+	EInventoryResult TryAddItem(const FItemData& ItemData, int32 ItemWidth = 1, int32 ItemHeight = 1);
 
 	/**
-	 * Añade un item en una ranura específica de la cuadrícula.
-	 * @param ItemData Datos del item
-	 * @param SlotIndex Índice de la ranura destino
-	 * @param ItemWidth Ancho del item
-	 * @param ItemHeight Alto del item
-	 * @return true si el item fue colocado con éxito
+	 * Coloca un item en una posición específica de la cuadrícula.
+	 * @param bRotated Si se coloca rotado 90° (intercambia ancho y alto)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Inventario")
-	bool AddItemToSlot(const FItemData& ItemData, int32 SlotIndex, int32 ItemWidth = 1, int32 ItemHeight = 1);
+	EInventoryResult PlaceItemAt(const FItemData& ItemData, int32 SlotIndex,
+		int32 ItemWidth = 1, int32 ItemHeight = 1, bool bRotated = false);
+
+	/** Elimina un item del inventario por su ID de instancia */
+	UFUNCTION(BlueprintCallable, Category = "Inventario")
+	EInventoryResult RemoveItem(const FGuid& ItemID);
 
 	/**
-	 * Elimina un item del inventario por su ID único.
-	 * @param ItemID ID del item a eliminar
-	 * @return true si el item fue encontrado y eliminado
+	 * Mueve un item de un slot raíz a otro.
+	 * Si el destino está ocupado, intenta intercambiar los items.
+	 * @param bRotateOnMove Si se rota el item al moverlo
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Inventario")
-	bool RemoveItem(const FGuid& ItemID);
+	EInventoryResult MoveItem(int32 FromRootSlot, int32 ToRootSlot, bool bRotateOnMove = false);
 
 	/**
-	 * Elimina una cantidad específica de un item apilable.
-	 * @param ItemDefinitionID ID de la definición del item
-	 * @param Amount Cantidad a eliminar
+	 * Divide un stack en dos. Deja (Amount) en el slot original
+	 * y crea un nuevo item con el resto en el primer slot libre.
+	 * @param ItemID ID del stack a dividir
+	 * @param Amount Cantidad que queda en el slot original
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Inventario")
+	EInventoryResult SplitStack(const FGuid& ItemID, int32 Amount);
+
+	/**
+	 * Elimina una cantidad de un item apilable por su definición.
+	 * Recorre stacks de menor a mayor tamaño para minimizar fragmentación.
 	 * @return Cantidad realmente eliminada
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Inventario")
-	int32 RemoveItemByDefinition(const FName& ItemDefinitionID, int32 Amount);
+	int32 RemoveAmountByDefinition(const FName& ItemDefinitionID, int32 Amount);
 
 	/**
-	 * Equipa un item de la cuadrícula en la ranura de equipamiento correspondiente.
-	 * @param ItemID ID del item en el inventario a equipar
-	 * @param Slot Ranura de equipamiento objetivo
-	 * @return true si el item fue equipado con éxito
+	 * Equipa un item del inventario en la ranura de equipamiento indicada.
+	 * Si la ranura ya está ocupada, intercambia con el item actual.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Inventario|Equipamiento")
-	bool EquipItem(const FGuid& ItemID, EEquipmentSlot Slot);
+	EInventoryResult EquipItem(const FGuid& ItemID, EEquipmentSlot Slot);
 
-	/**
-	 * Desequipa un item de una ranura y lo devuelve al inventario.
-	 * @param Slot Ranura a desequipar
-	 * @return true si el item fue desequipado y colocado en el inventario
-	 */
+	/** Desequipa la ranura y devuelve el item al inventario */
 	UFUNCTION(BlueprintCallable, Category = "Inventario|Equipamiento")
-	bool UnequipItem(EEquipmentSlot Slot);
+	EInventoryResult UnequipItem(EEquipmentSlot Slot);
 
 	/**
-	 * Mueve un item entre dos ranuras de la cuadrícula.
-	 * @param FromSlot Ranura de origen
-	 * @param ToSlot Ranura de destino
-	 * @return true si el movimiento fue exitoso
+	 * Ordena automáticamente el inventario (compacta items hacia arriba-izquierda).
+	 * No reordena por tipo, solo compacta el espacio libre.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Inventario")
-	bool MoveItem(int32 FromSlot, int32 ToSlot);
+	void AutoSort();
 
-	// ---------------------------------------------------------
-	// CONSULTAS
-	// ---------------------------------------------------------
+	// ============================================================
+	// RPCS: CLIENTE → SERVIDOR
+	// El cliente pide la operación; el servidor valida y ejecuta.
+	// ============================================================
 
-	/**
-	 * Busca un item en el inventario por su ID único.
-	 * @param ItemID ID del item a buscar
-	 * @param OutItemData Datos del item si se encuentra
-	 * @return true si el item fue encontrado
-	 */
-	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario")
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventario|RPC")
+	void ServerRequestMoveItem(int32 FromRootSlot, int32 ToRootSlot, bool bRotate);
+
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventario|RPC")
+	void ServerRequestDropItem(FGuid ItemID);
+
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventario|RPC")
+	void ServerRequestSplitStack(FGuid ItemID, int32 Amount);
+
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventario|RPC")
+	void ServerRequestEquipItem(FGuid ItemID, EEquipmentSlot Slot);
+
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventario|RPC")
+	void ServerRequestUnequipItem(EEquipmentSlot Slot);
+
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventario|RPC")
+	void ServerRequestAutoSort();
+
+	// ============================================================
+	// CONSULTAS (const, disponibles en cliente y servidor)
+	// ============================================================
+
+	/** Busca un item por ID. Solo busca en slots raíz. */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
 	bool FindItem(const FGuid& ItemID, FItemData& OutItemData) const;
 
-	/**
-	 * Cuenta cuántas unidades de un item específico hay en el inventario.
-	 * @param ItemDefinitionID ID de la definición del item a contar
-	 * @return Cantidad total en el inventario
-	 */
-	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario")
+	/** Devuelve el índice del slot raíz de un item (-1 si no existe) */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
+	int32 FindItemRootSlot(const FGuid& ItemID) const;
+
+	/** Cuenta unidades totales de un tipo de item (suma stacks) */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
 	int32 GetItemCount(const FName& ItemDefinitionID) const;
 
-	/**
-	 * Verifica si hay espacio disponible para un item de las dimensiones dadas.
-	 * @param ItemWidth Ancho del item en celdas
-	 * @param ItemHeight Alto del item en celdas
-	 * @return true si existe al menos una posición válida
-	 */
-	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario")
+	/** Devuelve true si hay espacio para un item de las dimensiones indicadas */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
 	bool HasSpaceFor(int32 ItemWidth, int32 ItemHeight) const;
 
-	/**
-	 * Obtiene el item equipado en una ranura específica.
-	 * @param Slot Ranura de equipamiento a consultar
-	 * @param OutItemData Datos del item equipado
-	 * @return true si la ranura está ocupada
-	 */
-	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Equipamiento")
+	/** Devuelve el item equipado en una ranura (false si está vacía) */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
 	bool GetEquippedItem(EEquipmentSlot Slot, FItemData& OutItemData) const;
 
-	/**
-	 * Devuelve el número total de celdas ocupadas en la cuadrícula.
-	 * @return Número de celdas ocupadas
-	 */
-	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario")
-	int32 GetUsedSlotCount() const;
+	/** Peso actual en kilogramos (para la UI) */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
+	float GetCurrentWeightKg() const { return CurrentWeightGrams / 1000.0f; }
 
-	/** Capacidad total de la cuadrícula en celdas */
-	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario")
+	/** Peso máximo en kilogramos */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
+	float GetMaxWeightKg() const { return GetMaxWeightGrams() / 1000.0f; }
+
+	/** Ratio peso/máximo (0.0 – 1.0+). >1.0 = sobrecargado */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
+	float GetWeightRatio() const;
+
+	/** Número de celdas libres en la cuadrícula */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
+	int32 GetFreeSlotCount() const;
+
+	/** Número de celdas totales (GridColumns * GridRows) */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
 	int32 GetTotalSlotCount() const { return GridColumns * GridRows; }
 
-	// ---------------------------------------------------------
+	/**
+	 * Devuelve todos los items únicos del inventario (sin duplicar por celdas secundarias).
+	 * Útil para serialización y UI.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
+	TArray<FItemData> GetAllItems() const;
+
+	/** Calcula el valor total de loot en CZ (requiere acceso a DataTable) */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Inventario|Consulta")
+	int32 GetTotalLootValueCZ() const;
+
+	// ============================================================
 	// DELEGADOS
-	// ---------------------------------------------------------
+	// ============================================================
 
 	UPROPERTY(BlueprintAssignable, Category = "Inventario|Delegados")
 	FOnItemAdded OnItemAdded;
@@ -194,44 +266,69 @@ public:
 	FOnItemRemoved OnItemRemoved;
 
 	UPROPERTY(BlueprintAssignable, Category = "Inventario|Delegados")
+	FOnItemMoved OnItemMoved;
+
+	UPROPERTY(BlueprintAssignable, Category = "Inventario|Delegados")
 	FOnEquipmentChanged OnEquipmentChanged;
 
 	UPROPERTY(BlueprintAssignable, Category = "Inventario|Delegados")
 	FOnInventoryChanged OnInventoryChanged;
 
-	// ---------------------------------------------------------
-	// OVERRIDES
-	// ---------------------------------------------------------
+	UPROPERTY(BlueprintAssignable, Category = "Inventario|Delegados")
+	FOnWeightChanged OnWeightChanged;
+
+	// ============================================================
+	// CICLO DE VIDA
+	// ============================================================
+
 	virtual void BeginPlay() override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 protected:
-	/**
-	 * Busca el primer slot libre que pueda contener un item de las dimensiones dadas.
-	 * @param ItemWidth Ancho del item
-	 * @param ItemHeight Alto del item
-	 * @param OutSlotIndex Índice del slot encontrado
-	 * @return true si se encontró un slot válido
-	 */
-	bool FindFreeSlot(int32 ItemWidth, int32 ItemHeight, int32& OutSlotIndex) const;
+	// ============================================================
+	// UTILIDADES INTERNAS
+	// ============================================================
+
+	/** Reconstruye la cuadrícula con las dimensiones actuales. Llama tras equipar mochila/chaleco. */
+	void RebuildGrid();
 
 	/**
-	 * Verifica si un item cabe en una posición específica de la cuadrícula.
-	 * @param StartSlot Índice de inicio
-	 * @param ItemWidth Ancho del item
-	 * @param ItemHeight Alto del item
-	 * @return true si el item cabe sin solaparse
+	 * Calcula las dimensiones totales de la cuadrícula según el equipo.
+	 * La cuadrícula es siempre un único rectángulo; el chaleco y la mochila
+	 * añaden filas/columnas al bloque base.
 	 */
-	bool CanFitItemAt(int32 StartSlot, int32 ItemWidth, int32 ItemHeight) const;
+	void RecalculateGridSize();
 
-	/** Inicializa la cuadrícula de inventario con slots vacíos */
-	void InitializeGrid();
+	/** Recalcula CurrentWeightGrams a partir de todos los items del grid y equipamiento */
+	void RecalculateWeight();
 
-	/** Callback de replicación del inventario */
+	/** Peso máximo en gramos (base + modificadores de equipo) */
+	int32 GetMaxWeightGrams() const;
+
+	/** Busca la primera posición libre para un item. Devuelve -1 si no hay espacio. */
+	int32 FindFirstFreeSlot(int32 ItemWidth, int32 ItemHeight, bool bTryRotated = false) const;
+
+	/** Verifica si un item de (W x H) cabe en SlotIndex sin solapar otros items. */
+	bool CanFitAt(int32 SlotIndex, int32 EffectiveWidth, int32 EffectiveHeight) const;
+
+	/** Marca/desmarca las celdas que ocupa un item. */
+	void OccupyCells(int32 RootSlot, const FItemData& ItemData,
+		int32 EffectiveWidth, int32 EffectiveHeight, bool bRotated, bool bOccupy);
+
+	/** Devuelve el puntero al FItemData del slot de equipamiento (para escritura). */
+	FItemData* GetEquipmentSlotPtr(EEquipmentSlot Slot);
+	const FItemData* GetEquipmentSlotPtr(EEquipmentSlot Slot) const;
+
+	// ============================================================
+	// CALLBACKS DE REPLICACIÓN
+	// ============================================================
+
 	UFUNCTION()
-	void OnRep_Inventory();
+	void OnRep_Grid();
 
-	/** Callback de replicación del equipamiento */
 	UFUNCTION()
 	void OnRep_Equipment();
+
+	UFUNCTION()
+	void OnRep_Weight();
 };
