@@ -144,15 +144,19 @@ public:
 		const FGeometry& InGeometry,
 		const FPointerEvent& InMouseEvent) override;
 
-protected:
-
 	/** Clase del widget de item a instanciar. Debe establecerse en el Blueprint hijo. */
 	UPROPERTY(EditDefaultsOnly, Category = "Cuadrícula|Config")
 	TSubclassOf<UInventoryItemWidget> ItemWidgetClass;
 
-	/** Lista de widgets de item actualmente instanciados en el canvas */
-	UPROPERTY()
+	/**
+	 * Lista de widgets de item actualmente instanciados en el canvas.
+	 * Expuesto públicamente para que UInventoryMainWidget pueda vincular
+	 * los delegados OnRightClicked, OnHoverStart y OnHoverEnd tras RebuildItemWidgets.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Cuadrícula|Estado")
 	TArray<TObjectPtr<UInventoryItemWidget>> ActiveItemWidgets;
+
+protected:
 
 	// ============================================================
 	// CALLBACKS INTERNOS
