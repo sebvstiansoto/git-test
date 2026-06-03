@@ -16,26 +16,20 @@ public class ZonaRoja : ModuleRules
             "Engine",
             "InputCore",
             "EnhancedInput",           // Sistema de entrada mejorado de UE5
-            "GameplayAbilities",       // Sistema de habilidades de gameplay (GAS)
-            "GameplayTags",            // Etiquetas de gameplay para clasificación
-            "GameplayTasks",           // Tareas de gameplay asíncronas
-            "NetCore",                 // Núcleo de red para multijugador
-            "OnlineSubsystem",         // Subsistema online abstracto
-            "OnlineSubsystemUtils",    // Utilidades del subsistema online
-            "UMG",                     // Unreal Motion Graphics para UI
-            "Slate",                   // Framework de UI Slate
+            "GameplayTags",            // Etiquetas de gameplay (parte del motor, sin plugin extra)
+            "NetCore",                 // Net/UnrealNetwork.h para replicación
+            "UMG",                     // Blueprint/UserWidget, DragDropOperation
+            "Slate",                   // Input/Reply.h y Framework de UI
             "SlateCore",               // Núcleo de Slate
-            "CommonUI",                // UI común reutilizable
-            "Niagara",                 // Sistema de partículas Niagara para VFX
-            "PhysicsCore",             // Física de núcleo para balística
-            "NavigationSystem",        // Sistema de navegación para IA
-            "AIModule"                 // Módulo de inteligencia artificial
+            "Niagara",                 // NiagaraFunctionLibrary para VFX
+            "PhysicsCore",             // PhysicalMaterials/PhysicalMaterial.h
+            "NavigationSystem",        // NavigationSystem.h, PathFollowingComponent
+            "AIModule"                 // AIController, BehaviorTree, Perception
         });
 
         // Módulos privados: solo usados internamente por este módulo
         PrivateDependencyModuleNames.AddRange(new string[] {
-            "MetasoundEngine",         // Motor de MetaSounds para audio procedural
-            "MotionWarping"            // Warping de movimiento para animaciones contextuales
+            "MotionWarping"            // MotionWarpingComponent (plugin habilitado en .uproject)
         });
     }
 }
