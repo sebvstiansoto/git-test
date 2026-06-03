@@ -55,6 +55,15 @@ AZRPlayerCharacter::AZRPlayerCharacter()
 	// Motion Warping para animaciones contextuales (vault, mantle)
 	MotionWarpingComponent = CreateDefaultSubobject<UMotionWarpingComponent>(TEXT("MotionWarpingComponent"));
 
+	// Mesh de brazos en primera persona.
+	// Se adjunta a la cámara para que siempre siga exactamente la vista del jugador.
+	// Solo se muestra al dueño (SetOnlyOwnerSee=true en BeginPlay).
+	FPPMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FPPMesh"));
+	FPPMesh->SetupAttachment(CameraComponent);
+	FPPMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -160.0f)); // Offset para alinear con la cámara
+	FPPMesh->bCastDynamicShadow = false;   // Los brazos FPP no proyectan sombra (evita artefactos)
+	FPPMesh->CastShadow = false;
+
 	// ---------------------------------------------------------
 	// CONFIGURACION DE MOVIMIENTO
 	// ---------------------------------------------------------
@@ -109,6 +118,26 @@ void AZRPlayerCharacter::BeginPlay()
 	if (IsLocallyControlled() && InteractionComponent)
 	{
 		InteractionComponent->EnableInteraction();
+	}
+
+	// -------------------------------------------------------
+	// CONFIGURACION DE VISIBILIDAD PRIMERA/TERCERA PERSONA
+	// -------------------------------------------------------
+	// El jugador LOCAL ve sus propios brazos (FPPMesh) pero NO su cuerpo completo.
+	// Los demás jugadores ven el cuerpo completo (GetMesh()) pero NO los brazos FPP.
+	// Esto evita que el jugador vea su propio cuerpo flotando frente a él.
+	if (IsLocallyControlled())
+	{
+		// Brazos FPP: solo visibles para el dueño
+		FPPMesh->SetOnlyOwnerSee(true);
+
+		// Cuerpo TPP: invisible para el dueño (pero visible en shadow para los demás)
+		GetMesh()->SetOwnerNoSee(true);
+	}
+	else
+	{
+		// Para otros jugadores: ocultar los brazos FPP (no son relevantes)
+		FPPMesh->SetVisibility(false);
 	}
 }
 

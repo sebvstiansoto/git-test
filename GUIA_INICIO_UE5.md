@@ -22,6 +22,16 @@ https://visualstudio.microsoft.com/es/vs/community/
 
 > ⚠️ Es OBLIGATORIO crear un proyecto C++, no Blueprint. Nuestro código fuente lo requiere.
 
+> 🎮 **¿Por qué plantilla "Third Person" si el juego es en primera persona?**
+> En un extraction shooter multijugador ocurren dos cosas a la vez:
+> - **Tú** ves la cámara en 1ª persona + tus brazos con el arma
+> - **Los demás jugadores** ven tu cuerpo completo en 3ª persona
+>
+> La plantilla Third Person nos da el personaje completo con esqueleto, movimiento
+> y físicas. Nosotros le añadimos encima la cámara FPP y los brazos.
+> La plantilla First Person de UE5 solo tiene brazos flotantes — no sirve para
+> multijugador táctico.
+
 1. Abre **Unreal Engine 5** desde Epic Games Launcher → botón **Launch**
 2. Aparece la ventana "Unreal Project Browser"
 3. En la columna izquierda, selecciona **Games**
@@ -276,30 +286,51 @@ Dentro del Blueprint verás:
 - **Components** (izquierda): lista de componentes
 - **Event Graph** (pestaña): lógica visual
 
-Por ahora cierra el Blueprint. Lo configuraremos en el siguiente paso.
-
 ---
 
-## PASO 9 — ASIGNAR EL ESQUELETO AL PERSONAJE
+## PASO 9 — CONFIGURAR LOS DOS MESHES (TPP y FPP)
 
-Para que el personaje se vea en pantalla, necesita un Skeletal Mesh.
-UE5 viene con el "Mannequin" (maniquí de prueba).
+Tu personaje necesita **dos meshes**:
 
-1. Abre `BP_PlayerCharacter` (doble clic)
-2. En el panel **Components** (izquierda), haz clic en **Mesh (CharacterMesh0)**
-3. En el panel **Details** (derecha) busca la sección **Mesh**
-4. Haz clic en el selector de **Skeletal Mesh Asset**
-5. Busca "Manny" o "SKM_Manny" — es el maniquí que viene con la plantilla
-6. Selecciónalo
-7. El personaje aparecerá en el Viewport del Blueprint
+| Mesh | Qué es | Quién lo ve |
+|------|--------|-------------|
+| **Mesh** (cuerpo completo) | Maniquí entero con ropa y equipo | Solo los DEMÁS jugadores |
+| **FPPMesh** (solo brazos) | Manos y arma en primer plano | Solo TÚ (el jugador local) |
 
-Ajusta la posición del mesh:
-- En Details, busca **Transform → Location**
-- Pon Z = -90 (para que los pies queden en el suelo de la cápsula)
-- Pon **Rotation** → Z = -90 (para que mire hacia adelante)
+### 9.1 Asignar el cuerpo completo (Mesh)
 
-8. Haz clic en **Compile** (botón arriba a la izquierda con un rayo verde)
-9. Haz clic en **Save**
+1. En el panel **Components**, haz clic en **Mesh (CharacterMesh0)**
+2. En **Details** → sección **Mesh** → **Skeletal Mesh Asset**
+3. Busca y selecciona `SKM_Manny` (el maniquí de UE5)
+4. Ajusta la posición en **Details → Transform**:
+   - **Location Z** = `-90`
+   - **Rotation Z** = `-90`
+
+Este mesh es el cuerpo completo que los demás jugadores verán de ti.
+El código ya se encarga de ocultártelo a ti mismo.
+
+### 9.2 Asignar los brazos FPP (FPPMesh)
+
+1. En el panel **Components**, busca y haz clic en **FPPMesh**
+2. En **Details** → **Mesh** → **Skeletal Mesh Asset**
+3. Busca `SKM_Manny_Arms` o cualquier mesh de brazos
+   - Si no tienes uno, puedes usar temporalmente el mismo `SKM_Manny`
+   - Más adelante importarás los brazos desde Blender
+4. Deja la posición que viene por defecto (el código ya la ajusta)
+
+> 💡 **Tip**: Los brazos FPP van adjuntos a la cámara, por lo que siempre
+> se mueven con exactamente la misma rotación que donde miras.
+
+### 9.3 Verificar la cámara
+
+1. En **Components**, haz clic en **CameraComponent**
+2. En **Details** → **Camera Settings**:
+   - **Field of View**: 90 (valor estándar para FPS)
+3. En **Transform**: la posición ya está configurada en el código
+   (adjunta al SpringArm que está en el socket "head" del Mesh)
+
+4. Haz clic en **Compile** (botón arriba con un rayo ⚡)
+5. Haz clic en **Save**
 
 ---
 

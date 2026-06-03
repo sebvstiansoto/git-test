@@ -70,6 +70,15 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Animaciones")
 	TObjectPtr<UMotionWarpingComponent> MotionWarpingComponent;
 
+	/**
+	 * Mesh de brazos en primera persona (solo visible para el jugador local).
+	 * Muestra las manos y el arma desde la perspectiva FPP.
+	 * El cuerpo completo (Mesh heredado de ACharacter) es visible para TODOS
+	 * los demás jugadores pero invisible para el dueño.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Cámara|Primera Persona")
+	TObjectPtr<USkeletalMeshComponent> FPPMesh;
+
 	// ---------------------------------------------------------
 	// ESTADO DEL MOVIMIENTO (replicado)
 	// ---------------------------------------------------------
