@@ -4,7 +4,7 @@
 
 #include "UI/Inventory/InventoryMainWidget.h"
 #include "UI/Inventory/InventoryGridWidget.h"
-#include "UI/Inventory/InventoryTooltipWidget.h"
+#include "UI/Inventory/InventoryItemTooltipWidget.h"
 #include "UI/Inventory/ZRItemContextMenuWidget.h"
 #include "UI/Inventory/EquipmentSlotWidget.h"
 #include "UI/Inventory/InventoryItemWidget.h"
@@ -22,9 +22,9 @@ void UInventoryMainWidget::NativeConstruct()
 	Super::NativeConstruct();
 
 	// Ocultar el tooltip y el menú contextual al abrir el inventario
-	if (TooltipWidget)
+	if (ItemTooltipWidget)
 	{
-		TooltipWidget->SetVisibility(ESlateVisibility::Collapsed);
+		ItemTooltipWidget->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
 	if (ContextMenuWidget)
@@ -294,32 +294,32 @@ void UInventoryMainWidget::HandleItemRightClicked(
 
 void UInventoryMainWidget::HandleItemHoverStart(UInventoryItemWidget* Widget)
 {
-	if (!TooltipWidget || !Widget)
+	if (!ItemTooltipWidget || !Widget)
 	{
 		return;
 	}
 
 	// Rellenar el tooltip con los datos del item
-	TooltipWidget->RefreshTooltip(Widget->ItemData);
+	ItemTooltipWidget->RefreshTooltip(Widget->ItemData);
 
 	// Posicionar el tooltip cerca del cursor (con un offset para no tapar el item)
 	const FVector2D MousePos = GetMouseScreenPosition();
 	const FVector2D TooltipOffset(15.0f, 10.0f); // Desplazamiento del cursor
 
 	// Hacer visible el tooltip
-	TooltipWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
+	ItemTooltipWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
 
 	// La posición exacta del tooltip se delega al Blueprint que puede
 	// ajustar los márgenes para que no salga de los límites de la pantalla.
 	// Aquí establecemos el renderizado de posición del widget.
-	TooltipWidget->SetRenderTranslation(MousePos + TooltipOffset);
+	ItemTooltipWidget->SetRenderTranslation(MousePos + TooltipOffset);
 }
 
 void UInventoryMainWidget::HandleItemHoverEnd(UInventoryItemWidget* Widget)
 {
-	if (TooltipWidget)
+	if (ItemTooltipWidget)
 	{
-		TooltipWidget->SetVisibility(ESlateVisibility::Collapsed);
+		ItemTooltipWidget->SetVisibility(ESlateVisibility::Collapsed);
 	}
 }
 

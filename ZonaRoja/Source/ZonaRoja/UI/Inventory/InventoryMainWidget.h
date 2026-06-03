@@ -51,7 +51,7 @@ public:
 
 	/** Tooltip flotante que aparece al pasar el cursor sobre un item */
 	UPROPERTY(meta = (BindWidget))
-	TObjectPtr<UInventoryTooltipWidget> TooltipWidget;
+	TObjectPtr<UInventoryTooltipWidget> ItemTooltipWidget;
 
 	/** Menú contextual de clic derecho */
 	UPROPERTY(meta = (BindWidget))

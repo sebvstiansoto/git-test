@@ -80,7 +80,7 @@ public:
 	 * Implementar en el Blueprint hijo.
 	 */
 	UFUNCTION(BlueprintImplementableEvent, BlueprintCallable, Category = "Equipamiento|Visual")
-	void RefreshSlotVisuals(const FItemData& Item, EEquipmentSlot Slot);
+	void RefreshSlotVisuals(const FItemData& Item, EEquipmentSlot InSlot);
 
 	/**
 	 * Aplica o quita el resaltado de arrastre sobre la ranura.
