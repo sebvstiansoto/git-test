@@ -12,7 +12,7 @@
 class UInventoryComponent;
 class UInventoryGridWidget;
 class UInventoryTooltipWidget;
-class UItemContextMenuWidget;
+class UZRItemContextMenuWidget;
 class UEquipmentSlotWidget;
 class UInventoryItemWidget;
 
@@ -25,7 +25,7 @@ class UInventoryItemWidget;
  * Contiene:
  *  - UInventoryGridWidget*    GridWidget        — cuadrícula de items
  *  - UInventoryTooltipWidget* TooltipWidget     — tooltip flotante de item
- *  - UItemContextMenuWidget*  ContextMenuWidget — menú contextual de clic derecho
+ *  - UZRItemContextMenuWidget*  ContextMenuWidget — menú contextual de clic derecho
  *  - TArray<UEquipmentSlotWidget*> EquipmentSlotWidgets — las 9 ranuras de equipo
  *
  * Flujo de inicialización:
@@ -55,7 +55,7 @@ public:
 
 	/** Menú contextual de clic derecho */
 	UPROPERTY(meta = (BindWidget))
-	TObjectPtr<UItemContextMenuWidget> ContextMenuWidget;
+	TObjectPtr<UZRItemContextMenuWidget> ContextMenuWidget;
 
 	// ============================================================
 	// RANURAS DE EQUIPAMIENTO

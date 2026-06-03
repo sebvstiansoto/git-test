@@ -1,4 +1,4 @@
-// ItemContextMenuWidget.h
+// ZRItemContextMenuWidget.h
 // Menú contextual de clic derecho para acciones sobre items del inventario.
 // Muestra opciones como equipar, tirar, dividir stack, inspeccionar y desechar.
 
@@ -7,7 +7,7 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "Data/ZRTypes.h"
-#include "ItemContextMenuWidget.generated.h"
+#include "ZRItemContextMenuWidget.generated.h"
 
 class UInventoryComponent;
 
@@ -35,7 +35,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInspectRequested,
  * Todas las acciones que mutan el inventario envían RPCs al servidor.
  */
 UCLASS(Abstract, BlueprintType, Blueprintable)
-class ZONAROJA_API UItemContextMenuWidget : public UUserWidget
+class ZONAROJA_API UZRItemContextMenuWidget : public UUserWidget
 {
 	GENERATED_BODY()
 

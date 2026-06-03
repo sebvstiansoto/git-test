@@ -1,14 +1,14 @@
-// ItemContextMenuWidget.cpp
+// ZRItemContextMenuWidget.cpp
 // Implementación del menú contextual de items del inventario.
 
-#include "UI/Inventory/ItemContextMenuWidget.h"
+#include "UI/Inventory/ZRItemContextMenuWidget.h"
 #include "Components/InventoryComponent.h"
 
 // ============================================================
 // CONTROL DE VISIBILIDAD
 // ============================================================
 
-void UItemContextMenuWidget::ShowForItem(
+void UZRItemContextMenuWidget::ShowForItem(
 	const FItemData& Item,
 	int32 RootSlot,
 	UInventoryComponent* Inventory,
@@ -35,7 +35,7 @@ void UItemContextMenuWidget::ShowForItem(
 	PositionAt(ScreenPosition);
 }
 
-void UItemContextMenuWidget::Hide()
+void UZRItemContextMenuWidget::Hide()
 {
 	SetVisibility(ESlateVisibility::Collapsed);
 
@@ -49,7 +49,7 @@ void UItemContextMenuWidget::Hide()
 // ACCIONES DEL MENU
 // ============================================================
 
-void UItemContextMenuWidget::OnClickEquip()
+void UZRItemContextMenuWidget::OnClickEquip()
 {
 	if (!OwningInventory || !ContextItem.IsValid())
 	{
@@ -74,7 +74,7 @@ void UItemContextMenuWidget::OnClickEquip()
 	Hide();
 }
 
-void UItemContextMenuWidget::OnClickDrop()
+void UZRItemContextMenuWidget::OnClickDrop()
 {
 	if (!OwningInventory || !ContextItem.IsValid())
 	{
@@ -89,7 +89,7 @@ void UItemContextMenuWidget::OnClickDrop()
 	Hide();
 }
 
-void UItemContextMenuWidget::OnClickSplitStack()
+void UZRItemContextMenuWidget::OnClickSplitStack()
 {
 	if (!OwningInventory || !ContextItem.IsValid() || ContextItem.StackCount <= 1)
 	{
@@ -107,7 +107,7 @@ void UItemContextMenuWidget::OnClickSplitStack()
 	Hide();
 }
 
-void UItemContextMenuWidget::OnClickInspect()
+void UZRItemContextMenuWidget::OnClickInspect()
 {
 	if (!ContextItem.IsValid())
 	{
@@ -122,7 +122,7 @@ void UItemContextMenuWidget::OnClickInspect()
 	Hide();
 }
 
-void UItemContextMenuWidget::OnClickDiscard()
+void UZRItemContextMenuWidget::OnClickDiscard()
 {
 	if (!OwningInventory || !ContextItem.IsValid())
 	{
@@ -144,7 +144,7 @@ void UItemContextMenuWidget::OnClickDiscard()
 // UTILIDADES INTERNAS
 // ============================================================
 
-bool UItemContextMenuWidget::CanItemBeEquipped() const
+bool UZRItemContextMenuWidget::CanItemBeEquipped() const
 {
 	// TODO: Integración con DataTable pendiente — consultar EItemType del item
 	// para determinar si puede equiparse en alguna ranura de equipamiento.

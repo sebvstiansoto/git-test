@@ -5,7 +5,7 @@
 #include "UI/Inventory/InventoryMainWidget.h"
 #include "UI/Inventory/InventoryGridWidget.h"
 #include "UI/Inventory/InventoryTooltipWidget.h"
-#include "UI/Inventory/ItemContextMenuWidget.h"
+#include "UI/Inventory/ZRItemContextMenuWidget.h"
 #include "UI/Inventory/EquipmentSlotWidget.h"
 #include "UI/Inventory/InventoryItemWidget.h"
 #include "UI/Inventory/InventoryDragDropOperation.h"
