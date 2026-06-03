@@ -9,6 +9,10 @@ public class ZonaRoja : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+        // Agregar el directorio raíz del módulo al include path para que
+        // includes como "Components/HealthComponent.h" se resuelvan correctamente
+        PrivateIncludePaths.Add(ModuleDirectory);
+
         // Módulos públicos: disponibles para otros módulos que dependan de éste
         PublicDependencyModuleNames.AddRange(new string[] {
             "Core",
