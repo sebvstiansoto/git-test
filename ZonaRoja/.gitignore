@@ -1,0 +1,120 @@
+# ============================================================
+# .gitignore para proyecto Unreal Engine 5 - ZonaRoja
+# Excluye archivos generados automáticamente y binarios grandes
+# ============================================================
+
+# ---------------------------------------------------------
+# DIRECTORIOS GENERADOS POR UE5 (nunca commitear)
+# ---------------------------------------------------------
+
+# Binarios compilados del proyecto
+Binaries/
+
+# Archivos intermedios de compilación
+Intermediate/
+
+# Guardados del editor, configuración de usuario local
+Saved/
+
+# Caché de datos derivados (enorme, se regenera automáticamente)
+DerivedDataCache/
+
+# Shaders compilados (se regeneran al abrir el proyecto)
+ShaderDebugInfo/
+
+# ---------------------------------------------------------
+# ARCHIVOS DEL IDE Y COMPILADOR
+# ---------------------------------------------------------
+
+# Visual Studio
+.vs/
+*.ncb
+*.suo
+*.user
+*.sdf
+*.opensdf
+ipch/
+x64/
+x32/
+Debug/
+Release/
+
+# Visual Studio Code
+.vscode/
+
+# Rider IDE
+.idea/
+*.iml
+
+# Archivos de solución generados automáticamente por UE
+# (se regeneran con Generate Visual Studio project files)
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# ---------------------------------------------------------
+# ARCHIVOS BINARIOS DE CONTENT (NO commitear)
+# Los assets binarios de UE5 se gestionan con herramientas
+# dedicadas como Perforce, Plastic SCM o Git LFS
+# ---------------------------------------------------------
+
+# Assets de Unreal Engine (binarios)
+*.uasset
+*.umap
+
+# Excepciones: los archivos .gitkeep preservan la estructura de carpetas
+!.gitkeep
+
+# ---------------------------------------------------------
+# ARCHIVOS TEMPORALES Y DEL SISTEMA
+# ---------------------------------------------------------
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# Archivos de log
+*.log
+
+# Archivos de crash
+*.dmp
+CrashReportClient/
+
+# ---------------------------------------------------------
+# ARCHIVOS DE BUILD
+# ---------------------------------------------------------
+
+# Build local (no el Build.cs de configuración)
+Build/
+
+# Archivos de distribución empaquetados
+PackagedBuilds/
+Releases/
+
+# ---------------------------------------------------------
+# OTROS ARCHIVOS A IGNORAR
+# ---------------------------------------------------------
+
+# Archivos de configuración local del usuario (sobreescriben la configuración del proyecto)
+Config/UserEditorPerProjectIniSettings.ini
+
+# Capturas de pantalla del editor
+Screenshots/
+
+# Nota: Los archivos en Source/, Config/ y el .uproject SÍ se incluyen
+# Los archivos .gitkeep en Content/ SÍ se incluyen para preservar la estructura
